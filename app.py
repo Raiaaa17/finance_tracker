@@ -9,6 +9,7 @@ import json
 from collections import defaultdict
 from calendar import monthrange
 import logging
+import traceback
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -18,31 +19,44 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# Initialize Supabase client
-try:
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_KEY")
-    
-    if not supabase_url or not supabase_key:
-        raise ValueError("Supabase URL and key must be provided in environment variables")
-        
-    supabase: Client = create_client(supabase_url, supabase_key)
-    logger.info("Supabase client initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize Supabase client: {str(e)}")
-    raise
+# Global clients
+supabase_client = None
+gemini_client = None
 
-# Initialize Gemini AI with function calling
-try:
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    if not gemini_key:
-        raise ValueError("Gemini API key must be provided in environment variables")
-        
-    client = genai.Client(api_key=gemini_key)
-    logger.info("Gemini AI client initialized successfully")
-except Exception as e:
-    logger.error(f"Failed to initialize Gemini AI client: {str(e)}")
-    raise
+def init_clients():
+    global supabase_client, gemini_client
+    
+    try:
+        if supabase_client is None:
+            supabase_url = os.getenv("SUPABASE_URL")
+            supabase_key = os.getenv("SUPABASE_KEY")
+            
+            if not supabase_url or not supabase_key:
+                raise ValueError("Supabase URL and key must be provided in environment variables")
+                
+            supabase_client = create_client(supabase_url, supabase_key)
+            logger.info("Supabase client initialized successfully")
+
+        if gemini_client is None:
+            gemini_key = os.getenv("GEMINI_API_KEY")
+            if not gemini_key:
+                raise ValueError("Gemini API key must be provided in environment variables")
+                
+            gemini_client = genai.Client(api_key=gemini_key)
+            logger.info("Gemini AI client initialized successfully")
+            
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize clients: {str(e)}")
+        logger.error(traceback.format_exc())
+        return False
+
+@app.before_request
+def before_request():
+    if not init_clients():
+        return jsonify({
+            'error': 'Failed to initialize required services. Please try again.'
+        }), 500
 
 EXPENSE_CATEGORIES = [
     "Food & Dining",
@@ -95,7 +109,7 @@ def analyze_expense_with_gemini(description: str):
         If no clear category fits, choose the closest match.
         """
         
-        response = client.models.generate_content(
+        response = gemini_client.models.generate_content(
             model="gemini-2.0-flash",
             contents=prompt,
             config=config
@@ -204,7 +218,7 @@ def get_dashboard_data():
     try:
         # Get all expenses
         logger.info("Fetching expenses from database...")
-        result = supabase.table('expenses').select('*').order('created_at', desc=True).execute()
+        result = supabase_client.table('expenses').select('*').order('created_at', desc=True).execute()
         
         if not result:
             logger.error("No result returned from Supabase")
@@ -295,6 +309,7 @@ def get_dashboard_data():
 
     except Exception as e:
         logger.error(f"Error getting dashboard data: {str(e)}")
+        logger.error(traceback.format_exc())
         return None
 
 @app.route('/')
@@ -377,7 +392,7 @@ def process_expense():
         }
         
         logger.info(f"Storing expense in database: {expense_data}")
-        result = supabase.table('expenses').insert(expense_data).execute()
+        result = supabase_client.table('expenses').insert(expense_data).execute()
         
         if not result.data:
             logger.error("Failed to store expense in database")
@@ -391,9 +406,11 @@ def process_expense():
         })
     except ValueError as ve:
         logger.error(f"Validation error: {str(ve)}")
+        logger.error(traceback.format_exc())
         return jsonify({'error': str(ve)}), 400
     except Exception as e:
         logger.error(f"Server error: {str(e)}")
+        logger.error(traceback.format_exc())
         return jsonify({'error': f'Server error: {str(e)}'}), 500
 
 @app.route('/api/expense/<expense_id>', methods=['PUT'])
@@ -423,7 +440,7 @@ def update_expense(expense_id):
             'description': data['description'].strip()
         }
         
-        result = supabase.table('expenses').update(update_data).eq('id', expense_id).execute()
+        result = supabase_client.table('expenses').update(update_data).eq('id', expense_id).execute()
         
         if not result.data:
             return jsonify({'error': 'Expense not found'}), 404
@@ -438,7 +455,7 @@ def update_expense(expense_id):
 @app.route('/api/expense/<expense_id>', methods=['DELETE'])
 def delete_expense(expense_id):
     try:
-        result = supabase.table('expenses').delete().eq('id', expense_id).execute()
+        result = supabase_client.table('expenses').delete().eq('id', expense_id).execute()
         
         if not result.data:
             return jsonify({'error': 'Expense not found'}), 404
@@ -455,12 +472,12 @@ def test_db():
     try:
         # Test database connection
         logger.info("Testing database connection...")
-        result = supabase.table('expenses').select('count').execute()
+        result = supabase_client.table('expenses').select('count').execute()
         if not result or not hasattr(result, 'data'):
             raise Exception("Could not connect to database")
             
         # Test data retrieval
-        result = supabase.table('expenses').select('*').limit(1).execute()
+        result = supabase_client.table('expenses').select('*').limit(1).execute()
         expenses = result.data if result and hasattr(result, 'data') else []
         
         return jsonify({
@@ -479,7 +496,7 @@ def test_db():
 def verify_db_connection():
     try:
         logger.info("Verifying database connection...")
-        result = supabase.table('expenses').select('count').execute()
+        result = supabase_client.table('expenses').select('count').execute()
         if not result or not hasattr(result, 'data'):
             raise Exception("Could not connect to database")
         logger.info("Database connection verified")
@@ -499,7 +516,7 @@ def check_db_connection():
 def get_all_expenses():
     try:
         logger.info("Fetching all expenses from database...")
-        result = supabase.table('expenses').select('*').order('created_at', desc=True).execute()
+        result = supabase_client.table('expenses').select('*').order('created_at', desc=True).execute()
         
         if not result or not hasattr(result, 'data'):
             logger.error("Failed to fetch expenses from database")
@@ -545,7 +562,7 @@ def create_expense():
             }), 400
             
         # Create expense in database
-        result = supabase.table('expenses').insert({
+        result = supabase_client.table('expenses').insert({
             'name': data['name'],
             'amount': amount,
             'category': data['category'],
@@ -568,11 +585,11 @@ def create_expense():
             'error': str(e)
         }), 500
 
-# Add this at the end of the file
+# Vercel handler
 app.debug = False
 
-# Vercel requires a WSGI handler
 if __name__ == '__main__':
+    init_clients()
     app.run()
 else:
     # For Vercel
