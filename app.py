@@ -33,8 +33,17 @@ def get_supabase_client():
             if not supabase_url or not supabase_key:
                 logger.error("Missing Supabase credentials")
                 return None
-                
-            supabase_client = create_client(supabase_url, supabase_key)
+            
+            # Add timeout and retries for serverless environment    
+            supabase_client = create_client(
+                supabase_url, 
+                supabase_key,
+                options={
+                    'timeout': 5,  # 5 seconds timeout
+                    'retries': 3,  # 3 retries
+                    'autoRefreshToken': False  # Disable token refresh in serverless
+                }
+            )
             logger.info("Supabase client initialized successfully")
         return supabase_client
     except Exception as e:
@@ -538,19 +547,32 @@ def check_db_connection():
             'error': 'Database connection error. Please check your configuration.'
         }), 500
 
+def safe_db_operation(operation):
+    """Wrapper for safe database operations with retries"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            client = get_supabase_client()
+            if not client:
+                raise Exception("Failed to initialize Supabase client")
+            return operation(client)
+        except Exception as e:
+            logger.error(f"Database operation failed (attempt {attempt + 1}/{max_retries}): {str(e)}")
+            if attempt == max_retries - 1:
+                raise
+            continue
+
 @app.route('/api/expenses')
 def get_all_expenses():
     try:
-        logger.info("Fetching all expenses from database...")
-        result = supabase_client.table('expenses').select('*').order('created_at', desc=True).execute()
-        
-        if not result or not hasattr(result, 'data'):
-            logger.error("Failed to fetch expenses from database")
-            return jsonify({'error': 'Failed to fetch expenses'}), 500
+        def fetch_expenses(client):
+            result = client.table('expenses').select('*').order('created_at', desc=True).execute()
+            if not result or not hasattr(result, 'data'):
+                raise Exception("Failed to fetch expenses from database")
+            return result.data
             
-        expenses = result.data
+        expenses = safe_db_operation(fetch_expenses)
         logger.info(f"Successfully fetched {len(expenses)} expenses")
-        
         return jsonify(expenses)
     except Exception as e:
         logger.error(f"Error fetching expenses: {str(e)}")
@@ -587,21 +609,24 @@ def create_expense():
                 'error': 'Invalid category'
             }), 400
             
-        # Create expense in database
-        result = supabase_client.table('expenses').insert({
-            'name': data['name'],
-            'amount': amount,
-            'category': data['category'],
-            'description': data['description'],
-            'created_at': data['created_at']
-        }).execute()
-        
-        if not result.data:
-            raise Exception("No data returned from database")
+        # Create expense in database using safe operation
+        def insert_expense(client):
+            result = client.table('expenses').insert({
+                'name': data['name'],
+                'amount': amount,
+                'category': data['category'],
+                'description': data['description'],
+                'created_at': data['created_at']
+            }).execute()
             
+            if not result.data:
+                raise Exception("No data returned from database")
+            return result.data[0]
+            
+        expense_data = safe_db_operation(insert_expense)
         return jsonify({
             'success': True,
-            'data': result.data[0]
+            'data': expense_data
         })
         
     except Exception as e:
@@ -618,9 +643,11 @@ if __name__ == '__main__':
     init_clients()
     app.run()
 else:
-    # For Vercel
+    # For Vercel serverless environment
     app.config.update(
         SESSION_COOKIE_SECURE=True,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE='Lax',
-    ) 
+    )
+    # Initialize clients on cold start
+    init_clients() 
