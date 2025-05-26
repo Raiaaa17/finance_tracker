@@ -19,44 +19,65 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# Global clients
+# Global clients with better initialization handling
 supabase_client = None
 gemini_client = None
 
-def init_clients():
-    global supabase_client, gemini_client
-    
+def get_supabase_client():
+    global supabase_client
     try:
         if supabase_client is None:
             supabase_url = os.getenv("SUPABASE_URL")
             supabase_key = os.getenv("SUPABASE_KEY")
             
             if not supabase_url or not supabase_key:
-                raise ValueError("Supabase URL and key must be provided in environment variables")
+                logger.error("Missing Supabase credentials")
+                return None
                 
             supabase_client = create_client(supabase_url, supabase_key)
             logger.info("Supabase client initialized successfully")
+        return supabase_client
+    except Exception as e:
+        logger.error(f"Supabase client initialization error: {str(e)}")
+        return None
 
+def get_gemini_client():
+    global gemini_client
+    try:
         if gemini_client is None:
             gemini_key = os.getenv("GEMINI_API_KEY")
             if not gemini_key:
-                raise ValueError("Gemini API key must be provided in environment variables")
+                logger.error("Missing Gemini API key")
+                return None
                 
             gemini_client = genai.Client(api_key=gemini_key)
             logger.info("Gemini AI client initialized successfully")
-            
-        return True
+        return gemini_client
     except Exception as e:
-        logger.error(f"Failed to initialize clients: {str(e)}")
-        logger.error(traceback.format_exc())
-        return False
+        logger.error(f"Gemini client initialization error: {str(e)}")
+        return None
+
+def init_clients():
+    """Initialize both clients and return success status"""
+    supabase = get_supabase_client()
+    gemini = get_gemini_client()
+    return supabase is not None and gemini is not None
 
 @app.before_request
 def before_request():
+    """Ensure clients are initialized before each request"""
+    if request.path == '/api/health':
+        return None
+        
     if not init_clients():
-        return jsonify({
-            'error': 'Failed to initialize required services. Please try again.'
-        }), 500
+        error_msg = "Failed to initialize required services. Please check your environment variables and try again."
+        logger.error(error_msg)
+        return jsonify({'error': error_msg}), 500
+
+# Add a health check endpoint
+@app.route('/api/health')
+def health_check():
+    return jsonify({'status': 'healthy'}), 200
 
 EXPENSE_CATEGORIES = [
     "Food & Dining",
@@ -93,6 +114,10 @@ analyze_expense_function = {
 
 def analyze_expense_with_gemini(description: str):
     try:
+        gemini = get_gemini_client()
+        if not gemini:
+            raise ValueError("Gemini client not initialized")
+            
         tools = types.Tool(function_declarations=[analyze_expense_function])
         config = types.GenerateContentConfig(tools=[tools])
         
@@ -109,7 +134,7 @@ def analyze_expense_with_gemini(description: str):
         If no clear category fits, choose the closest match.
         """
         
-        response = gemini_client.models.generate_content(
+        response = gemini.models.generate_content(
             model="gemini-2.0-flash",
             contents=prompt,
             config=config
@@ -121,6 +146,7 @@ def analyze_expense_with_gemini(description: str):
         else:
             raise ValueError("AI could not analyze the expense properly")
     except Exception as e:
+        logger.error(f"Error in analyze_expense_with_gemini: {str(e)}")
         raise ValueError(f"Error analyzing expense: {str(e)}")
 
 def get_top_categories(category_totals, limit=5):
