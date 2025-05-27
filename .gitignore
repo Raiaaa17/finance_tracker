@@ -22,12 +22,15 @@ wheels/
 
 # Virtual Environment
 venv/
-env/
 ENV/
-
-# Environment Variables
+env/
 .env
+
+# Vercel
+.vercel
+.now
 .env.local
+.env*.local
 
 # IDE
 .idea/
@@ -35,6 +38,6 @@ ENV/
 *.swp
 *.swo
 
-# Vercel
-.vercel/ 
-.vercel
+# OS
+.DS_Store
+Thumbs.db
